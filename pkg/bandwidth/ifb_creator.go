@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package bandwidth
 
 import (
 	"fmt"
@@ -24,7 +24,7 @@ import (
 	"github.com/containernetworking/plugins/pkg/ip"
 )
 
-const latencyInMillis = 25
+const LatencyInMillis = 25
 
 func CreateIfb(ifbDeviceName string, mtu int) error {
 	// do not set TxQLen > 0 nor TxQLen == -1 until issues have been fixed with numrxqueues / numtxqueues across interfaces
@@ -70,41 +70,34 @@ func CreateEgressQdisc(rateInBits, burstInBits uint64, hostDeviceName string, if
 		return fmt.Errorf("get host device: %s", err)
 	}
 
-	// add qdisc ingress on host device
-	ingress := &netlink.Ingress{
+	// add qdisc clsact on host device
+	clsact := &netlink.Clsact{
 		QdiscAttrs: netlink.QdiscAttrs{
 			LinkIndex: hostDevice.Attrs().Index,
 			Handle:    netlink.MakeHandle(0xffff, 0), // ffff:
-			Parent:    netlink.HANDLE_INGRESS,
+			Parent:    netlink.HANDLE_CLSACT,
 		},
 	}
 
-	err = netlink.QdiscAdd(ingress)
+	err = netlink.QdiscAdd(clsact)
 	if err != nil {
-		return fmt.Errorf("create ingress qdisc: %s", err)
+		return fmt.Errorf("create clsact qdisc: %s", err)
 	}
 
-	// add filter on host device to mirror traffic to ifb device
 	filter := &netlink.U32{
 		FilterAttrs: netlink.FilterAttrs{
 			LinkIndex: hostDevice.Attrs().Index,
-			Parent:    ingress.QdiscAttrs.Handle,
+			Parent:    netlink.HANDLE_MIN_EGRESS,
 			Priority:  1,
 			Protocol:  syscall.ETH_P_ALL,
 		},
 		ClassId:    netlink.MakeHandle(1, 1),
 		RedirIndex: ifbDevice.Attrs().Index,
-		Actions: []netlink.Action{
-			&netlink.MirredAction{
-				ActionAttrs:  netlink.ActionAttrs{},
-				MirredAction: netlink.TCA_EGRESS_REDIR,
-				Ifindex:      ifbDevice.Attrs().Index,
-			},
-		},
+		Actions:    []netlink.Action{netlink.NewMirredAction(ifbDevice.Attrs().Index)},
 	}
 	err = netlink.FilterAdd(filter)
 	if err != nil {
-		return fmt.Errorf("add filter: %s", err)
+		return fmt.Errorf("add egress filter: %s", err)
 	}
 
 	// throttle traffic on ifb device
@@ -128,9 +121,9 @@ func createTBF(rateInBits, burstInBits uint64, linkIndex int) error {
 	}
 	rateInBytes := rateInBits / 8
 	burstInBytes := burstInBits / 8
-	bufferInBytes := buffer(rateInBytes, uint32(burstInBytes))
-	latency := latencyInUsec(latencyInMillis)
-	limitInBytes := limit(rateInBytes, latency, uint32(burstInBytes))
+	bufferInBytes := Buffer(rateInBytes, uint32(burstInBytes))
+	latency := LatencyInUsec(LatencyInMillis)
+	limitInBytes := Limit(rateInBytes, latency, uint32(burstInBytes))
 
 	qdisc := &netlink.Tbf{
 		QdiscAttrs: netlink.QdiscAttrs{
@@ -153,14 +146,14 @@ func time2Tick(time uint32) uint32 {
 	return uint32(float64(time) * netlink.TickInUsec())
 }
 
-func buffer(rate uint64, burst uint32) uint32 {
+func Buffer(rate uint64, burst uint32) uint32 {
 	return time2Tick(uint32(float64(burst) * float64(netlink.TIME_UNITS_PER_SEC) / float64(rate)))
 }
 
-func limit(rate uint64, latency float64, buffer uint32) uint32 {
+func Limit(rate uint64, latency float64, buffer uint32) uint32 {
 	return uint32(float64(rate)*latency/float64(netlink.TIME_UNITS_PER_SEC)) + buffer
 }
 
-func latencyInUsec(latencyInMillis float64) float64 {
-	return float64(netlink.TIME_UNITS_PER_SEC) * (latencyInMillis / 1000.0)
+func LatencyInUsec(LatencyInMillis float64) float64 {
+	return float64(netlink.TIME_UNITS_PER_SEC) * (LatencyInMillis / 1000.0)
 }
